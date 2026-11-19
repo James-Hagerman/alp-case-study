@@ -1,0 +1,211 @@
+<!doctype html>
+{#-
+  HOA one-pager template (Jinja2)
+
+  Expects:
+    hoa          dict  hoa_code, association_name, city, state, unit_count, monthly_dues,
+                       fiscal_year_end (1-12), reserve_balance, last_reserve_study (YYYY-MM-DD),
+                       has_reserve_study, board_email
+    board        list  all board members: full_name, role, email, term_end
+    vendors      list  vendors linked to this HOA: vendor_name, trade, phone, coi_on_file
+    all_vendors  list  every row in vendors_intake (used for the coverage check)
+    summary      list  short "areas to watch" bullets
+    summary_source   str
+    reserve_per_unit float or None
+    soon         str  "YYYY-MM-DD", 90 days from today (yellow cutoff)
+    generated_at str  "YYYY-MM-DD", today's date (also used for expiry checks)
+
+  Colors: green = fine, yellow = due within 3 months, red = expired / overdue / missing.
+-#}
+{%- set months = ['January','February','March','April','May','June','July',
+                  'August','September','October','November','December'] -%}
+{%- macro missing(text='Not on file') -%}<span class="missing">{{ text }}</span>{%- endmacro -%}
+{%- macro money(x) -%}{% if x is not none %}${{ "{:,.2f}".format(x) }}{% else %}{{ missing('Not reported') }}{% endif %}{%- endmacro -%}
+{%- macro phone(p) -%}{% if p and p | length == 10 %}({{ p[:3] }}) {{ p[3:6] }}-{{ p[6:] }}{% elif p %}{{ p }}{% else %}{{ missing() }}{% endif %}{%- endmacro -%}
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ hoa.association_name or hoa.hoa_code }} – Association Profile</title>
+<style>
+  @page { size: letter; margin: 0.5in; }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", Arial, sans-serif; color: #1f2933; font-size: 12px; line-height: 1.4;
+         max-width: 8.5in; margin: 0 auto; padding: 24px; background: #fff; }
+  header { border-bottom: 3px solid #1f4e79; padding-bottom: 8px; margin-bottom: 14px;
+           display: flex; justify-content: space-between; align-items: flex-end; }
+  h1 { font-size: 22px; margin: 0; color: #1f4e79; }
+  .sub { color: #52606d; margin-top: 2px; }
+  .code { font-weight: 600; color: #52606d; text-align: right; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: #1f4e79;
+       border-bottom: 1px solid #d9e2ec; padding-bottom: 3px; margin: 14px 0 6px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { padding: 3px 6px; text-align: left; vertical-align: top; }
+  th { font-weight: 600; color: #52606d; font-size: 11px; border-bottom: 1px solid #d9e2ec; }
+  .kv td:first-child { color: #52606d; width: 42%; }
+  .kv td:last-child { font-weight: 600; }
+  tr + tr td { border-top: 1px solid #f0f4f8; }
+  .missing { color: #b42318; font-weight: 600; font-style: italic; }
+  .note { color: #52606d; font-weight: 400; font-size: 11px; }
+  .badge { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 10px; font-weight: 600; white-space: nowrap; }
+  .ok   { background: #e3f9e5; color: #1f7a33; }
+  .warn { background: #fef7c3; color: #854d0e; }
+  .bad  { background: #fee4e2; color: #b42318; }
+  .watch { background: #fffaf0; border-left: 4px solid #d97706; padding: 8px 12px; margin-top: 6px; }
+  .watch ul { margin: 0; padding-left: 18px; }
+  .watch li + li { margin-top: 3px; }
+  footer { margin-top: 16px; color: #9aa5b1; font-size: 10px; border-top: 1px solid #d9e2ec; padding-top: 6px; }
+  @media print { body { padding: 0; } }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>{{ hoa.association_name or missing('Name not on file') }}</h1>
+    <div class="sub">
+      {{ hoa.city or 'City not on file' }}{% if hoa.state %}, {{ hoa.state }}{% endif %}
+      {% if hoa.unit_count %} · {{ "{:,}".format(hoa.unit_count) }} units{% endif %}
+    </div>
+  </div>
+  <div class="code">{{ hoa.hoa_code }}<br><span class="sub">Association profile</span></div>
+</header>
+
+<div class="grid">
+  <section>
+    <h2>Identity</h2>
+    <table class="kv">
+      <tr><td>Association</td><td>{{ hoa.association_name or missing() }}</td></tr>
+      <tr><td>Location</td><td>{% if hoa.city or hoa.state %}{{ hoa.city or '—' }}, {{ hoa.state or '—' }}{% else %}{{ missing() }}{% endif %}</td></tr>
+      <tr><td>Units</td><td>{% if hoa.unit_count %}{{ "{:,}".format(hoa.unit_count) }}{% else %}{{ missing('Not reported') }}{% endif %}</td></tr>
+      <tr><td>Board contact</td><td>{{ hoa.board_email or missing() }}</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>Financial snapshot</h2>
+    <table class="kv">
+      <tr><td>Monthly dues (per unit)</td><td>{{ money(hoa.monthly_dues) }}</td></tr>
+      <tr><td>Est. monthly dues income</td><td>
+        {% if hoa.monthly_dues is not none and hoa.unit_count %}{{ money(hoa.monthly_dues * hoa.unit_count) }}
+          <div class="note">Dues × {{ hoa.unit_count }} units, assumes every unit pays the same</div>
+        {% else %}{{ missing('Can\'t calculate') }}{% endif %}
+      </td></tr>
+
+      {#- Fiscal year end: yellow when it's within 3 months (budget season), red when it's this month or next -#}
+      <tr><td>Fiscal year end</td><td>
+        {% if hoa.fiscal_year_end %}
+          {% set months_left = (hoa.fiscal_year_end - (generated_at[5:7] | int)) % 12 %}
+          {{ months[hoa.fiscal_year_end - 1] }}
+          {% if months_left <= 1 %}<span class="badge bad">{{ 'This month' if months_left == 0 else '1 month away' }}</span>
+            <div class="note">Budget should already be out to owners</div>
+          {% elif months_left <= 3 %}<span class="badge warn">{{ months_left }} months away</span>
+            <div class="note">Budget season</div>
+          {% else %}<span class="badge ok">{{ months_left }} months away</span>{% endif %}
+        {% else %}{{ missing('Not reported') }}{% endif %}
+      </td></tr>
+
+      <tr><td>Reserve balance</td><td>{{ money(hoa.reserve_balance) }}</td></tr>
+      <tr><td>Reserve per unit</td><td>{% if reserve_per_unit is not none %}${{ "{:,.0f}".format(reserve_per_unit) }}{% else %}{{ missing('Can\'t calculate') }}{% endif %}</td></tr>
+
+      {#- Reserve study: due 3 years after the last one. Yellow within 3 months of due, red once past due -#}
+      <tr><td>Reserve study</td><td>
+        {% if hoa.has_reserve_study and hoa.last_reserve_study %}
+          {% set due = ((hoa.last_reserve_study[:4] | int) + 3) ~ hoa.last_reserve_study[4:] %}
+          {% if due < generated_at %}<span class="badge bad">Overdue</span>
+          {% elif due <= soon %}<span class="badge warn">Due soon</span>
+          {% else %}<span class="badge ok">Current</span>{% endif %}
+          <div class="note">Last done {{ hoa.last_reserve_study }} · update due {{ due }}</div>
+        {% elif hoa.has_reserve_study %}<span class="badge warn">On file</span>
+          <div class="note">Date not recorded, can't tell if it's due</div>
+        {% else %}<span class="badge bad">Not on file</span>{% endif %}
+      </td></tr>
+    </table>
+  </section>
+</div>
+
+{#- Governance: red = term expired, yellow = term ends within 3 months -#}
+{%- set ns = namespace(current=0) -%}
+{%- for m in board %}{% if not m.term_end or m.term_end >= generated_at %}{% set ns.current = ns.current + 1 %}{% endif %}{% endfor -%}
+<section>
+  <h2>Governance · board ({{ ns.current }} of {{ board | length }} current)</h2>
+  {% if board %}
+  <table>
+    <tr><th>Role</th><th>Name</th><th>Email</th><th>Term ends</th></tr>
+    {% for m in board %}
+    <tr>
+      <td>{{ m.role or missing('Role not set') }}</td>
+      <td>{{ m.full_name }}</td>
+      <td>{{ m.email or missing() }}</td>
+      <td>
+        {% if not m.term_end %}No end date
+        {% elif m.term_end < generated_at %}<span class="badge bad">Expired</span> {{ m.term_end }}
+        {% elif m.term_end <= soon %}<span class="badge warn">Ends soon</span> {{ m.term_end }}
+        {% else %}{{ m.term_end }}{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% if ns.current == 0 %}<p>{{ missing('No current board members: every term on file has expired') }}</p>{% endif %}
+  {% else %}
+  <p>{{ missing('No board members on file') }}</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Vendors ({{ vendors | length }})</h2>
+  {% if vendors %}
+  <table>
+    <tr><th>Trade</th><th>Vendor</th><th>Phone</th><th>Insurance (COI)</th></tr>
+    {% for v in vendors | sort(attribute='trade') %}
+    <tr>
+      <td>{{ v.trade or '—' }}</td>
+      <td>{{ v.vendor_name }}</td>
+      <td>{{ phone(v.phone) }}</td>
+      <td>{% if v.coi_on_file %}<span class="badge ok">On file</span>{% else %}<span class="badge bad">Missing</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p>{{ missing('No vendors linked to this association') }}</p>
+  {% endif %}
+</section>
+
+{#- Coverage: for every trade in the vendor list, is it covered for this HOA?
+    green = a linked vendor, yellow = not linked but a vendor serves this city, red = nobody serves this city -#}
+<section>
+  <h2>Vendor coverage · {{ hoa.city or 'unknown city' }}</h2>
+  <table>
+    <tr><th>Trade</th><th>Status</th><th>Vendors</th></tr>
+    {% for trade in all_vendors | map(attribute='trade') | reject('none') | unique | sort %}
+    {% set linked = vendors | selectattr('trade', 'equalto', trade) | map(attribute='vendor_name') | list %}
+    {% set nearby = [] %}
+    {% for v in all_vendors if v.trade == trade and v.service_area and hoa.city in v.service_area and v.vendor_name not in linked %}{% set _ = nearby.append(v.vendor_name) %}{% endfor %}
+    <tr>
+      <td>{{ trade }}</td>
+      {% if linked %}<td><span class="badge ok">Covered</span></td><td>{{ linked | join(', ') }}</td>
+      {% elif nearby %}<td><span class="badge warn">Available</span></td><td>{{ nearby | join(', ') }} <span class="note">(serves {{ hoa.city }}, not linked)</span></td>
+      {% else %}<td><span class="badge bad">Gap</span></td><td><span class="note">No vendor on file serves {{ hoa.city or 'this city' }}</span></td>{% endif %}
+    </tr>
+    {% endfor %}
+  </table>
+</section>
+
+<section>
+  <h2>Summary · areas to watch</h2>
+  <div class="watch">
+    {% if summary %}
+    <ul>{% for item in summary %}<li>{{ item }}</li>{% endfor %}</ul>
+    {% else %}
+    <p>No issues flagged.</p>
+    {% endif %}
+  </div>
+</section>
+
+<footer>
+  Generated {{ generated_at }} from live Supabase data · Summary: {{ summary_source }} ·
+  <span class="badge warn">yellow</span> due within 3 months · <span class="badge bad">red</span> expired, overdue or missing
+</footer>
+
+</body>
+</html>
